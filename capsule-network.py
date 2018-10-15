@@ -1,71 +1,75 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Created on Mon Oct 15 12:12:40 2018
+Created on Thu Oct  4 21:37:08 2018
 
 @author: tsugaike3
 """
 
-# imports
+# import
+
 from __future__ import division, print_function, unicode_literals
 import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 import tensorflow as tf
 
-# reproducibility
+# Reproducibility
 tf.reset_default_graph()
 np.random.seed(42)
 tf.set_random_seed(42)
+
+# Load MNIST
 from tensorflow.examples.tutorials.mnist import input_data
 
-# load MNIST
-mnist = input_data.read_data_sets("/tmp/data/")
+mnist = input_data.read_data_sets("/tmp/data")
+
 n_samples = 5
 
-plt.figure(figsize=(n_samples * 2, 3))
-for index in range(n_samples):
-    plt.subplot(1, n_samples, index + 1)
-    sample_image = mnist.train.images[index].reshape(28, 28)
-    plt.imshow(sample_image, cmap="binary")
-    plt.axis("off")
+#plt.figure(figsize=(n_samples * 2, 3))
+#for index in range(n_samples):
+#    plt.subplot(1, n_samples, index + 1)
+#    sample_image = mnist.train.images[index].reshape(28, 28)
+#    plt.imshow(sample_image, cmap="binary")
+#    plt.axis("off")
+#plt.show()
 
-plt.show()
-mnist.train.labels[:n_samples]
-
-# input images
+# Input Images
 X = tf.placeholder(shape=[None, 28, 28, 1], dtype=tf.float32, name="X")
 
-# primary capsules
+# Primary Capsules
 caps1_n_maps = 32
-caps1_n_caps = caps1_n_maps * 6 * 6  # 1152 primary capsules
+caps1_n_caps = caps1_n_maps * 6 * 6
 caps1_n_dims = 8
 
 conv1_params = {
-    "filters": 256,
-    "kernel_size": 9,
-    "strides": 1,
-    "padding": "valid",
-    "activation": tf.nn.relu,
+        "filters": 256,
+        "kernel_size": 9,
+        "strides": 1,
+        "padding": "valid",
+        "activation": tf.nn.relu
 }
 
 conv2_params = {
-    "filters": caps1_n_maps * caps1_n_dims, # 256 convolutional filters
-    "kernel_size": 9,
-    "strides": 2,
-    "padding": "valid",
-    "activation": tf.nn.relu
+        "filters": caps1_n_maps * caps1_n_dims, # 256 convolutional filters
+        "kernel_size": 9,
+        "strides": 2,
+        "padding": "valid",
+        "activation": tf.nn.relu
 }
 
 conv1 = tf.layers.conv2d(X, name="conv1", **conv1_params)
+kernel1 = tf.get_collection(tf.GraphKeys.VARIABLES, 'conv1')[0]
+kernel1_list = tf.split(kernel1, 256, 3)
+kernel1_vis = tf.concat([tf.reshape(kernel1_list[i], [1, 9, 9, 1]) for i in range(256)], 0, "kernel1_vis")
 conv2 = tf.layers.conv2d(conv1, name="conv2", **conv2_params)
 
 caps1_raw = tf.reshape(conv2, [-1, caps1_n_caps, caps1_n_dims], name="caps1_raw")
 
-
 def squash(s, axis=-1, epsilon=1e-7, name=None):
     with tf.name_scope(name, default_name="squash"):
-        squared_norm = tf.reduce_sum(tf.square(s), axis=axis, keep_dims=True)
+        squared_norm = tf.reduce_mean(tf.square(s), axis=axis, keep_dims=True)
         safe_norm = tf.sqrt(squared_norm + epsilon)
         squash_factor = squared_norm / (1. + squared_norm)
         unit_vector = s / safe_norm
@@ -73,15 +77,16 @@ def squash(s, axis=-1, epsilon=1e-7, name=None):
     
 caps1_output = squash(caps1_raw, name="caps1_output")
 
-# digit capsules
+# Digit Capsules
+# Compute the Predicted Output Vectors
 caps2_n_caps = 10
 caps2_n_dims = 16
 
 init_sigma = 0.1
 
 W_init = tf.random_normal(
-    shape=(1, caps1_n_caps, caps2_n_caps, caps2_n_dims, caps1_n_dims),
-    stddev=init_sigma, dtype=tf.float32, name="W_init")
+        shape=(1, caps1_n_caps, caps2_n_caps, caps2_n_dims, caps1_n_dims),
+        stddev=init_sigma, dtype=tf.float32, name="W_init")
 W = tf.Variable(W_init, name="W")
 
 batch_size = tf.shape(X)[0]
@@ -92,80 +97,82 @@ caps1_output_tile = tf.expand_dims(caps1_output_expanded, 2, name="caps1_output_
 caps1_output_tiled = tf.tile(caps1_output_tile, [1, 1, caps2_n_caps, 1, 1], name="caps1_output_tiled")
 caps2_predicted = tf.matmul(W_tiled, caps1_output_tiled, name="caps2_predicted")
 
-# routing by agreement
+# Routing by agreement
 raw_weights = tf.zeros([batch_size, caps1_n_caps, caps2_n_caps, 1, 1],
                        dtype=np.float32, name="raw_weights")
 
-# rount 1
+# Round1
 routing_weights = tf.nn.softmax(raw_weights, dim=2, name="routing_weights")
 weighted_predictions = tf.multiply(routing_weights, caps2_predicted, name="weighted_predictions")
 weighted_sum = tf.reduce_sum(weighted_predictions, axis=1, keep_dims=True, name="weighted_sum")
 caps2_output_round_1 = squash(weighted_sum, axis=-2, name="caps2_output_round_1")
 
-# round 2
-caps2_output_round_1_tiled = tf.tile(
-    caps2_output_round_1, [1, caps1_n_caps, 1, 1, 1],
-    name="caps2_output_round_1_tiled")
-
+# Round2
+caps2_output_round_1_tiled = tf.tile(caps2_output_round_1, [1, caps1_n_caps, 1, 1, 1], name="caps2_output_round_1_tiled")
 agreement = tf.matmul(caps2_predicted, caps2_output_round_1_tiled, transpose_a=True, name="agreement")
 raw_weights_round_2 = tf.add(raw_weights, agreement, name="raw_weights_round_2")
-routing_weights_round_2 = tf.nn.softmax(raw_weights_round_2, dim=2,
-                                        name="routing_weights_round_2")
-weighted_predictions_round_2 = tf.multiply(routing_weights_round_2, caps2_predicted,
-                                           name="weighted_predictions_round_2")
-weighted_sum_round_2 = tf.reduce_sum(weighted_predictions_round_2, axis=1, keep_dims=True,
-                                     name="weighted_sum_round_2")
-caps2_output_round_2 = squash(weighted_sum_round_2, axis=-2,
-                              name="caps2_output_round_2")
+routing_weights_round_2 = tf.nn.softmax(raw_weights_round_2, dim=2, name="routing_weights_round_2")
+weighted_predictions_round_2 = tf.multiply(routing_weights_round_2, caps2_predicted, name="weighted_predictions_round_2")
+weighted_sum_round_2 = tf.reduce_sum(weighted_predictions_round_2, axis=1, keep_dims=True, name="weighted_sum_round_2")
+caps2_output_round_2 = squash(weighted_sum_round_2, axis=-2, name="caps2_output_round_2")
 caps2_output = caps2_output_round_2
 
-def condition(input, counter):
-    return tf.less(counter, 100)
-
-def loop_body(input, counter):
-    output = tf.add(input, tf.square(counter))
-    return output, tf.add(counter, 1)
-
-with tf.name_scope("compute_sum_of_squares"):
-    counter = tf.constant(1)
-    sum_of_squares = tf.constant(0)
-    result = tf.while_loop(condition, loop_body, [sum_of_squares, counter])
+#def condition(input, counter):
+#    return tf.less(counter, 100)
+#
+#def loop_body(input, counter):
+#    output = tf.add(input, tf.square(counter))
+#    return output, tf.add(counter, 1)
+#
+#with tf.name_scope("compute_sum_of_squares"):
+#    counter = tf.constant(1)
+#    sum_of_squares = tf.constant(0)
+#
+#    result = tf.while_loop(condition, loop_body, [sum_of_squares, counter])
+#    
+#
+#with tf.Session() as sess:
+#    print(sess.run(result))
     
-with tf.Session() as sess:
-    print(sess.run(result))
-
-# estimated class probabilities(length)
+# Estimated Class Probabilities
 def safe_norm(s, axis=-1, epsilon=1e-7, keep_dims=False, name=None):
     with tf.name_scope(name, default_name="safe_norm"):
-        squared_norm = tf.reduce_sum(tf.square(s), axis=axis, keep_dims=keep_dims)
+        squared_norm = tf.reduce_sum(tf.square(s), axis=axis,
+                                     keep_dims=keep_dims)
         return tf.sqrt(squared_norm + epsilon)
 
 y_proba = safe_norm(caps2_output, axis=-2, name="y_proba")
 y_proba_argmax = tf.argmax(y_proba, axis=2, name="y_proba")
 y_pred = tf.squeeze(y_proba_argmax, axis=[1,2], name="y_pred")
 
-# labels
+# Labels
 y = tf.placeholder(shape=[None], dtype=tf.int64, name="y")
 
-# margin loss
+# Margin Loss
 m_plus = 0.9
 m_minus = 0.1
 lambda_ = 0.5
 
 T = tf.one_hot(y, depth=caps2_n_caps, name="T")
 
+#with tf.Session():
+#    print(T.eval(feed_dict={y: np.array([0, 1, 2, 3, 9])}))
+    
 caps2_output_norm = safe_norm(caps2_output, axis=-2, keep_dims=True, name="caps2_output_norm")
-
 present_error_raw = tf.square(tf.maximum(0., m_plus - caps2_output_norm), name="present_error_raw")
 present_error = tf.reshape(present_error_raw, shape=(-1, 10), name="present_error")
-absent_error_raw = tf.square(tf.maximum(0., caps2_output_norm - m_minus), name="absent_error_raw")
-absent_error = tf.reshape(absent_error_raw, shape=(-1, 10), name="absent_error")
-L = tf.add(T * present_error, lambda_ * (1.0 - T) * absent_error, name="L")
+absent_error_raw = tf.square(tf.maximum(0., caps2_output_norm - m_minus),
+                             name="absent_error_raw")
+absent_error = tf.reshape(absent_error_raw, shape=(-1, 10),
+                          name="absent_error")
+L = tf.add(T * present_error, lambda_ * (1.0 - T) * absent_error,
+           name="L")
 margin_loss = tf.reduce_mean(tf.reduce_sum(L, axis=1), name="margin_loss")
 
-# reconstruction
-# mask
-mask_with_labels = tf.placeholder_with_default(False, shape=(), name="mask_with_labels")
+# Reconstruction
+# Mask
+mask_with_labels = tf.placeholder_with_default(False, shape=(),
+                                               name="mask_with_labels")
 reconstruction_targets = tf.cond(mask_with_labels, # condition
                                  lambda: y,        # if True
                                  lambda: y_pred,   # if False
@@ -183,7 +190,7 @@ decoder_input = tf.reshape(caps2_output_masked,
                            [-1, caps2_n_caps * caps2_n_dims],
                            name="decoder_input")
 
-# decoder
+# Decoder
 n_hidden1 = 512
 n_hidden2 = 1024
 n_output = 28 * 28
@@ -198,28 +205,33 @@ with tf.name_scope("decoder"):
     decoder_output = tf.layers.dense(hidden2, n_output,
                                      activation=tf.nn.sigmoid,
                                      name="decoder_output")
-
-# reconstruction loss
+    
+# Reconstructions loss
 X_flat = tf.reshape(X, [-1, n_output], name="X_flat")
-squared_difference = tf.square(X_flat - decoder_output, name="squared_difference")
-reconstruction_loss = tf.reduce_mean(squared_difference, name="reconstruction_loss")
+squared_difference = tf.square(X_flat - decoder_output,
+                               name="squared_difference")
+reconstruction_loss = tf.reduce_mean(squared_difference,
+                                    name="reconstruction_loss")
 
-# final loss
+# Final Loss
 alpha = 0.0005
 loss = tf.add(margin_loss, alpha * reconstruction_loss, name="loss")
 
+# Final Touches
 # accuracy
+
 correct = tf.equal(y, y_pred, name="correct")
 accuracy = tf.reduce_mean(tf.cast(correct, tf.float32), name="accuracy")
 
-# training operations
+# Training operation
 optimizer = tf.train.AdamOptimizer()
 training_op = optimizer.minimize(loss, name="training_op")
 
+# Init and Saver
 init = tf.global_variables_initializer()
 saver = tf.train.Saver()
 
-# training
+# Training
 n_epochs = 1
 batch_size = 50
 restore_checkpoint = True
@@ -230,20 +242,42 @@ best_loss_val = np.infty
 checkpoint_path = "./my_capsule_network"
 
 with tf.Session() as sess:
+    # TensorBoard
+    tf.summary.scalar("margin_loss", margin_loss)
+    tf.summary.scalar("reconstruction_loss", reconstruction_loss)
+    tf.summary.scalar("loss", loss)
+    tf.summary.histogram('W', W)
+    tf.summary.histogram("routing_weights",routing_weights)
+    tf.summary.histogram('weighted_predictions', weighted_predictions)
+    tf.summary.histogram('weighted_sum', weighted_sum)
+    tf.summary.histogram('caps2_output_round_1', caps2_output_round_1)
+    tf.summary.histogram('caps2_output_round_1_tiled', caps2_output_round_1_tiled)
+    tf.summary.histogram('agreement', agreement)
+    tf.summary.histogram('raw_weights_round_2', raw_weights_round_2)
+    tf.summary.histogram('routing_weights_round_2', routing_weights_round_2)
+    tf.summary.histogram('weighted_predictions_round_2', weighted_predictions_round_2)
+    tf.summary.histogram('weighted_sum_round_2', weighted_sum_round_2)
+    tf.summary.image("X", X, 10)
+    tf.summary.image("kernel1_vis", kernel1_vis, 10)
+    
+    summary = tf.summary.merge_all()
+    writer = tf.summary.FileWriter("./tensorboard", sess.graph)
+
     if restore_checkpoint and tf.train.checkpoint_exists(checkpoint_path):
         saver.restore(sess, checkpoint_path)
     else:
         init.run()
-
+    
     for epoch in range(n_epochs):
         for iteration in range(1, n_iterations_per_epoch + 1):
             X_batch, y_batch = mnist.train.next_batch(batch_size)
             # Run the training operation and measure the loss:
-            _, loss_train = sess.run(
-                [training_op, loss],
+            summary_val, _, loss_train = sess.run(
+                [summary, training_op, loss],
                 feed_dict={X: X_batch.reshape([-1, 28, 28, 1]),
                            y: y_batch,
                            mask_with_labels: True})
+            writer.add_summary(summary_val, iteration)        
             print("\rIteration: {}/{} ({:.1f}%)  Loss: {:.5f}".format(
                       iteration, n_iterations_per_epoch,
                       iteration * 100 / n_iterations_per_epoch,
@@ -277,7 +311,7 @@ with tf.Session() as sess:
             save_path = saver.save(sess, checkpoint_path)
             best_loss_val = loss_val
 
-# evaluation
+# Evaluation
 n_iterations_test = mnist.test.num_examples // batch_size
 
 with tf.Session() as sess:
@@ -301,8 +335,8 @@ with tf.Session() as sess:
     acc_test = np.mean(acc_tests)
     print("\rFinal test accuracy: {:.4f}%  Loss: {:.6f}".format(
         acc_test * 100, loss_test))
-
-# predictions
+    
+# Predictions
 n_samples = 5
 
 sample_images = mnist.test.images[:n_samples].reshape([-1, 28, 28, 1])
@@ -324,7 +358,7 @@ for index in range(n_samples):
     plt.title("Label:" + str(mnist.test.labels[index]))
     plt.axis("off")
 
-plt.show()
+#plt.show()
 
 plt.figure(figsize=(n_samples * 2, 3))
 for index in range(n_samples):
@@ -333,9 +367,9 @@ for index in range(n_samples):
     plt.imshow(reconstructions[index], cmap="binary")
     plt.axis("off")
     
-plt.show()
+#plt.show()
 
-# interpreting the output vectors
+# Interpreting the Output Vectors
 def tweak_pose_parameters(output_vectors, min=-0.5, max=0.5, n_steps=11):
     steps = np.linspace(min, max, n_steps) # -0.25, -0.15, ..., +0.25
     pose_parameters = np.arange(caps2_n_dims) # 0, 1, ..., 15
@@ -344,11 +378,13 @@ def tweak_pose_parameters(output_vectors, min=-0.5, max=0.5, n_steps=11):
     output_vectors_expanded = output_vectors[np.newaxis, np.newaxis]
     return tweaks + output_vectors_expanded
 
-n_steps = 11
+min = -0.5
+max = 0.5
+#n_steps = 11
+n_steps = 20
 
-tweaked_vectors = tweak_pose_parameters(caps2_output_value, n_steps=n_steps)
-tweaked_vectors_reshaped = tweaked_vectors.reshape(
-    [-1, 1, caps2_n_caps, caps2_n_dims, 1])
+tweaked_vectors = tweak_pose_parameters(caps2_output_value, min=min, max = max, n_steps=n_steps)
+tweaked_vectors_reshaped = tweaked_vectors.reshape([-1, 1, caps2_n_caps, caps2_n_dims, 1])
 
 tweak_labels = np.tile(mnist.test.labels[:n_samples], caps2_n_dims * n_steps)
 
@@ -359,12 +395,11 @@ with tf.Session() as sess:
             feed_dict={caps2_output: tweaked_vectors_reshaped,
                        mask_with_labels: True,
                        y: tweak_labels})
-
-
+    
 tweak_reconstructions = decoder_output_value.reshape(
         [caps2_n_dims, n_steps, n_samples, 28, 28])
 
-for dim in range(3):
+for dim in range(16):
     print("Tweaking output dimension #{}".format(dim))
     plt.figure(figsize=(n_steps / 1.2, n_samples / 1.5))
     for row in range(n_samples):
@@ -372,6 +407,37 @@ for dim in range(3):
             plt.subplot(n_samples, n_steps, row * n_steps + col + 1)
             plt.imshow(tweak_reconstructions[dim, col, row], cmap="binary")
             plt.axis("off")
-    plt.show()
-    
+#    plt.show()
+    plt.savefig("./output/dim{}.jpg".format(dim))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
